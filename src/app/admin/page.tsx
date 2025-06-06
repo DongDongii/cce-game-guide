@@ -78,8 +78,12 @@ if (typeof window !== "undefined") {
 
 type ViewMode = "list" | "edit" | "create" | "login";
 
-// Admin password - in production, this should be stored securely
-const ADMIN_PASSWORD = "cce2024admin";
+// Admin credentials - in production, this should be stored securely
+const ADMIN_USERNAME = "admin";
+const ADMIN_PASSWORD = "adminCCE.COM";
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOGIN_TIMEOUT_MINUTES = 30;
+const SESSION_TIMEOUT_MINUTES = 60;
 
 // Custom hook to safely handle localStorage
 function useLocalStorage(key: string, initialValue: string) {
@@ -122,6 +126,72 @@ function useLocalStorage(key: string, initialValue: string) {
   };
 
   return [storedValue, setValue, removeValue, isLoaded] as const;
+}
+
+// 添加登录尝试次数和超时管理
+function useLoginAttempts() {
+  const [attempts, setAttempts] = useState(0);
+  const [lockoutUntil, setLockoutUntil] = useState<number | null>(null);
+
+  const incrementAttempts = () => {
+    const newAttempts = attempts + 1;
+    setAttempts(newAttempts);
+    
+    if (newAttempts >= MAX_LOGIN_ATTEMPTS) {
+      const lockoutTime = Date.now() + LOGIN_TIMEOUT_MINUTES * 60 * 1000;
+      setLockoutUntil(lockoutTime);
+      localStorage.setItem('admin-lockout-until', lockoutTime.toString());
+    }
+  };
+
+  const resetAttempts = () => {
+    setAttempts(0);
+    setLockoutUntil(null);
+    localStorage.removeItem('admin-lockout-until');
+  };
+
+  useEffect(() => {
+    const storedLockout = localStorage.getItem('admin-lockout-until');
+    if (storedLockout) {
+      const lockoutTime = parseInt(storedLockout);
+      if (lockoutTime > Date.now()) {
+        setLockoutUntil(lockoutTime);
+      } else {
+        localStorage.removeItem('admin-lockout-until');
+      }
+    }
+  }, []);
+
+  return { attempts, lockoutUntil, incrementAttempts, resetAttempts };
+}
+
+// 添加会话超时管理
+function useSessionTimeout() {
+  const [lastActivity, setLastActivity] = useState<number>(Date.now());
+
+  useEffect(() => {
+    const updateActivity = () => setLastActivity(Date.now());
+    window.addEventListener('mousemove', updateActivity);
+    window.addEventListener('keydown', updateActivity);
+    window.addEventListener('click', updateActivity);
+
+    const checkTimeout = setInterval(() => {
+      const inactiveTime = Date.now() - lastActivity;
+      if (inactiveTime > SESSION_TIMEOUT_MINUTES * 60 * 1000) {
+        localStorage.removeItem('admin-authenticated');
+        window.location.reload();
+      }
+    }, 60000); // 每分钟检查一次
+
+    return () => {
+      window.removeEventListener('mousemove', updateActivity);
+      window.removeEventListener('keydown', updateActivity);
+      window.removeEventListener('click', updateActivity);
+      clearInterval(checkTimeout);
+    };
+  }, [lastActivity]);
+
+  return { lastActivity, setLastActivity };
 }
 
 // Error boundary component
@@ -178,9 +248,12 @@ export default function AdminPage() {
   const [authStatus, setAuthStatus, removeAuthStatus, isAuthLoaded] =
     useLocalStorage("admin-authenticated", "false");
   const [viewMode, setViewMode] = useState<ViewMode>("login");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isHydrated, setIsHydrated] = useState(false);
+  const { attempts, lockoutUntil, incrementAttempts, resetAttempts } = useLoginAttempts();
+  const { setLastActivity } = useSessionTimeout();
 
   const [articles, setArticles] = useState<SEOArticle[]>([]);
   const [drafts, setDrafts] = useState<SEOArticle[]>([]);
@@ -224,12 +297,22 @@ export default function AdminPage() {
   }, [isAuthenticated]);
 
   const handleLogin = () => {
-    if (password === ADMIN_PASSWORD) {
+    if (lockoutUntil && Date.now() < lockoutUntil) {
+      const remainingMinutes = Math.ceil((lockoutUntil - Date.now()) / (60 * 1000));
+      alert(`登录尝试次数过多，请在 ${remainingMinutes} 分钟后重试`);
+      return;
+    }
+
+    if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
       setIsAuthenticated(true);
       setViewMode("list");
       setAuthStatus("true");
+      resetAttempts();
+      setLastActivity(Date.now());
     } else {
-      alert("Incorrect password!");
+      incrementAttempts();
+      const remainingAttempts = MAX_LOGIN_ATTEMPTS - attempts - 1;
+      alert(`用户名或密码错误！还剩 ${remainingAttempts} 次尝试机会`);
     }
   };
 
@@ -464,21 +547,40 @@ export default function AdminPage() {
               <Lock className="h-12 w-12 text-blue-600 mx-auto mb-4" />
               <h1 className="text-2xl font-bold text-gray-900">Admin Login</h1>
               <p className="text-gray-600">
-                Enter password to access admin dashboard
+                Enter username and password to access admin dashboard
               </p>
+              {lockoutUntil && Date.now() < lockoutUntil && (
+                <p className="text-red-600 mt-2">
+                  {`登录已锁定，请在 ${Math.ceil((lockoutUntil - Date.now()) / (60 * 1000))} 分钟后重试`}
+                </p>
+              )}
             </div>
 
             <div className="space-y-4">
               <Input
+                type="text"
+                placeholder="Username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                className="text-center w-full"
+                autoComplete="username"
+                disabled={lockoutUntil !== null && Date.now() < lockoutUntil}
+              />
+              <Input
                 type="password"
-                placeholder="Enter admin password"
+                placeholder="Password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 onKeyPress={(e) => e.key === "Enter" && handleLogin()}
                 className="text-center w-full"
                 autoComplete="current-password"
+                disabled={lockoutUntil !== null && Date.now() < lockoutUntil}
               />
-              <Button onClick={handleLogin} className="w-full">
+              <Button 
+                onClick={handleLogin} 
+                className="w-full"
+                disabled={lockoutUntil !== null && Date.now() < lockoutUntil}
+              >
                 Login
               </Button>
             </div>
